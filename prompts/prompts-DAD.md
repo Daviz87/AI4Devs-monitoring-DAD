@@ -1478,3 +1478,543 @@ Finalmente, crearemos un dashboard básico en Datadog para visualizar métricas 
 
 Este conjunto de cambios te proporcionará una base sólida para la monitorización de tus instancias EC2 con Datadog, todo gestionado a través de Terraform. Si tienes alguna pregunta o necesitas ajustes, no dudes en consultarme.
 
+## Prompt 5
+**Fecha:** 25/05/2025
+**Modelo:** Gemini 2.5 Pro (inferido)
+
+**Usuario:**
+# Generated Prompt
+
+You are an **Expert CI/CD Engineer** specializing in GitHub Actions, AWS, and Docker, acting as `@cicd_expert.mdc` within the Cursor IDE. You have access to the `AI4Devs-monitoring-DAD` project files.
+
+Your mission is to design and generate a GitHub Actions workflow file named `.github/workflows/terraform-backend-pipeline.yml`. This workflow will automate the testing, building, and deployment of the project's **backend application**, which is a Node.js/TypeScript application using Prisma and Jest. The deployment target is an AWS EC2 instance, presumably managed by Terraform, where the application runs as a Docker container.
+
+Leverage your knowledge of the `AI4Devs-monitoring-DAD` project structure, particularly the `backend/package.json`, `docker-compose.yml`, and the existing EC2 deployment strategy outlined in `tf/scripts/backend_user_data.sh`.
+
+**Workflow Requirements:**
+
+1.  **Workflow File Name:** `.github/workflows/terraform-backend-pipeline.yml`
+
+2.  **Trigger:**
+    * The workflow MUST be triggered on pull requests targeting the `main` or `develop` branches. Specifically, on `opened`, `synchronize` (pushes to the PR branch), and `reopened` events.
+    ```yaml
+    on:
+      pull_request:
+        branches:
+          - main
+          - develop # Add other relevant long-lived branches if necessary
+        types:
+          - opened
+          - synchronize
+          - reopened
+    ```
+
+3.  **Jobs:**
+    The workflow should consist of the following sequential jobs:
+
+    * **Job 1: `backend-tests`**
+        * **Name:** Backend Tests
+        * **Purpose:** Run all backend tests.
+        * **Runner:** `ubuntu-latest`.
+        * **Services:**
+            * Include a PostgreSQL service if backend tests require a database connection. Refer to `docker-compose.yml` for database details (e.g., image `postgres:13`, user, password, db name). Ensure the backend service within the workflow can connect to this PostgreSQL service (e.g., using appropriate environment variables like `DATABASE_URL`).
+        * **Steps:**
+            1.  Checkout the code: `uses: actions/checkout@v4`.
+            2.  Set up Node.js (e.g., version 18.x or as specified in project's `.nvmrc` or `package.json` engines field if present): `uses: actions/setup-node@v4` with `with: node-version: '18'`.
+            3.  Install backend dependencies: Run `npm ci` in the `backend` directory.
+                ```bash
+                working-directory: ./backend
+                run: npm ci
+                ```
+            4.  Run backend tests: Execute `npm test` from the `backend` directory.
+                ```bash
+                working-directory: ./backend
+                run: npm test
+                ```
+                (This executes `jest` as per `backend/package.json`).
+        * **Condition:** This job should always run when the workflow is triggered.
+
+    * **Job 2: `backend-build-and-push-docker`**
+        * **Name:** Build and Push Backend Docker Image
+        * **Purpose:** Build the backend Docker image and push it to a container registry (suggest AWS ECR, but also mention Docker Hub as an alternative).
+        * **Dependency:** Must only run if `backend-tests` job completes successfully (`needs: backend-tests`).
+        * **Runner:** `ubuntu-latest`.
+        * **Permissions:** (If pushing to AWS ECR and using OIDC)
+            ```yaml
+            permissions:
+              id-token: write # Required for AWS OIDC
+              contents: read  # Required to checkout the repo
+            ```
+        * **Steps:**
+            1.  Checkout the code.
+            2.  **AWS ECR Specific (Recommended):**
+                * Configure AWS credentials using OIDC or secrets: `uses: aws-actions/configure-aws-credentials@v4`.
+                * Login to Amazon ECR: `uses: aws-actions/amazon-ecr-login@v2`.
+                * Define ECR repository name (e.g., `ai4devs-backend`). This could be a secret or hardcoded if static.
+                * Build, tag, and push Docker image to ECR. The Dockerfile should be located at `backend/Dockerfile` (if it doesn't exist, note that it needs to be created).
+                    ```bash
+                    ECR_REGISTRY=<your-aws-account-id>.dkr.ecr.<your-aws-region>.amazonaws.com
+                    ECR_REPOSITORY=ai4devs-backend # Or from secrets.ECR_REPOSITORY_BACKEND
+                    IMAGE_TAG=${{ github.sha }} # Or use a semantic version
+                    
+                    docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./backend
+                    docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+                    ```
+            3.  **Docker Hub Specific (Alternative):**
+                * Login to Docker Hub: `uses: docker/login-action@v3` with `username: ${{ secrets.DOCKERHUB_USERNAME }}` and `password: ${{ secrets.DOCKERHUB_TOKEN }}`.
+                * Define Docker Hub repository name (e.g., `your-username/ai4devs-backend`).
+                * Build, tag, and push Docker image to Docker Hub.
+                    ```bash
+                    DOCKERHUB_REPOSITORY=your-username/ai4devs-backend # Or from secrets.DOCKERHUB_REPOSITORY_BACKEND
+                    IMAGE_TAG=${{ github.sha }}
+
+                    docker build -t $DOCKERHUB_REPOSITORY:$IMAGE_TAG ./backend
+                    docker push $DOCKERHUB_REPOSITORY:$IMAGE_TAG
+                    ```
+            4.  **Output Image URI/Tag:** Use `outputs` to pass the full image URI and tag to the deploy job.
+        * **Condition:** Runs only on success of `backend-tests`.
+
+    * **Job 3: `deploy-backend-to-ec2`**
+        * **Name:** Deploy Backend to EC2
+        * **Purpose:** Deploy the newly built backend Docker image to the target AWS EC2 instance.
+        * **Dependency:** Must only run if `backend-build-and-push-docker` job completes successfully (`needs: backend-build-and-push-docker`).
+        * **Runner:** `ubuntu-latest`.
+        * **Environment specific (optional):** If you have different EC2 instances for different environments (e.g., staging, production based on the PR target branch), you might use GitHub Environments here.
+        * **Steps:**
+            1.  Configure AWS credentials (if needed for other AWS CLI commands, though SSH deploy might not directly need it if keys are managed).
+            2.  Download the image URI/tag from the previous job's outputs.
+            3.  Use an action like `appleboy/ssh-action@master` or write a script using `ssh` to connect to the EC2 instance and perform the deployment. This requires secrets: `EC2_HOST`, `EC2_USERNAME`, `EC2_SSH_PRIVATE_KEY`.
+            4.  On the EC2 instance, execute commands to:
+                * Pull the new Docker image from the registry: `docker pull <IMAGE_URI_FROM_PREVIOUS_JOB>`.
+                * Stop the existing backend container (e.g., `docker stop ai4devs-backend-container || true`).
+                * Remove the existing backend container (e.g., `docker rm ai4devs-backend-container || true`).
+                * Run the new backend container with the new image, ensuring necessary environment variables (like `DATABASE_URL`, `JWT_SECRET`, `PORT=3001`) and port mappings are configured. Refer to `backend_user_data.sh` and `docker-compose.yml` for existing configurations.
+                    ```bash
+                    # Example commands to run on EC2 via SSH
+                    # Ensure environment variables are sourced or passed correctly
+                    docker pull ${{ needs.backend-build-and-push-docker.outputs.image_uri }}:${{ needs.backend-build-and-push-docker.outputs.image_tag }}
+                    docker stop ai4devs-backend-container || true
+                    docker rm ai4devs-backend-container || true
+                    docker run -d --name ai4devs-backend-container \
+                      -p 3001:3001 \
+                      -e DATABASE_URL='${{ secrets.EC2_DATABASE_URL }}' \
+                      -e JWT_SECRET='${{ secrets.EC2_JWT_SECRET }}' \
+                      # Add other necessary env vars
+                      --restart always \
+                      ${{ needs.backend-build-and-push-docker.outputs.image_uri }}:${{ needs.backend-build-and-push-docker.outputs.image_tag }}
+                    ```
+        * **Condition:** Runs only on success of `backend-build-and-push-docker`.
+
+**Output and Explanation Requirements from You (the LLM executing this prompt):**
+
+1.  **Generate the complete `terraform-backend-pipeline.yml` file** within a Markdown code block.
+    * Use placeholders ONLY if critical information (like specific ECR repository names if not inferable, or Dockerfile content if absent and cannot be reasonably scaffolded) is missing. Clearly comment these placeholders.
+    * Assume a `backend/Dockerfile` exists or provide a basic scaffold for a Node.js application if you are asked to create one.
+2.  **Provide a step-by-step, in-depth explanation** of the generated `terraform-backend-pipeline.yml` file. For each section (trigger, each job, key steps), explain:
+    * Its purpose and functionality.
+    * Key configurations used (e.g., `on`, `runs-on`, `needs`, `if`, `uses`, `with`, `env`, `secrets`, `permissions`, `services`, `working-directory`).
+    * **Secrets Management:** Detail ALL GitHub Secrets that the user needs to configure in their repository settings for this pipeline to work. Examples:
+        * `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` (if using access keys for AWS auth).
+        * `ECR_REPOSITORY_BACKEND` (optional, if ECR repo name is a secret).
+        * `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` (if using Docker Hub).
+        * `EC2_HOST` (target EC2 instance IP or DNS).
+        * `EC2_USERNAME` (SSH user for EC2).
+        * `EC2_SSH_PRIVATE_KEY` (SSH private key to access EC2).
+        * `EC2_DATABASE_URL` (Database URL for the application running on EC2).
+        * `EC2_JWT_SECRET` (JWT Secret for the application running on EC2).
+    * **Dockerfile for Backend:** Briefly outline what a minimal `backend/Dockerfile` should contain for a Node.js/TypeScript application (multi-stage build is recommended: builder stage for `npm ci` and `npm run build`, final stage copying from builder and running `npm start`).
+    * Any assumptions made (e.g., EC2 instance already has Docker installed and configured, necessary security group rules for SSH and application port).
+
+**Contextual Instructions for You (the LLM executing this prompt):**
+* Leverage your access to the `AI4Devs-monitoring-DAD` project files in the Cursor IDE to make informed decisions about commands, paths, and configurations.
+* If the `backend/Dockerfile` is missing, state this clearly and suggest creating one, perhaps offering a template.
+* The goal is a functional and best-practice oriented GitHub Actions workflow template tailored to this project.
+
+**Referenced Documentation (for your knowledge, not necessarily to include in the output unless explaining a complex feature):**
+* GitHub Actions Quickstart: `https://docs.github.com/en/actions/writing-workflows/quickstart`
+* Deploy to EC2: `https://lightrains.com/blogs/deploy-aws-ec2-using-github-actions/`
+
+---
+**Mandatory Language Instruction for You (the LLM executing this prompt):**
+You MUST provide ALL your outputs (the YAML file and the detailed explanation) and conduct ALL your interactions with the user exclusively in **SPANISH**.
+---
+
+**Asistente:**
+¡Absolutamente! Como tu Ingeniero de CI/CD experto, diseñaré y te explicaré un pipeline de GitHub Actions robusto y eficiente para tu aplicación backend. Este pipeline automatizará las pruebas, la construcción de la imagen Docker y su despliegue en AWS EC2.
+
+Primero, verifica si tienes un archivo `backend/Dockerfile`. Si no es así, necesitarás crearlo. Más adelante te proporcionaré una plantilla básica para una aplicación Node.js/TypeScript como la tuya.
+
+Aquí tienes el contenido del archivo `.github/workflows/terraform-backend-pipeline.yml`:
+
+```yaml
+name: Backend CI/CD Pipeline (Terraform Project)
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+jobs:
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:13 # Coincide con tu docker-compose.yml
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: mydatabase
+        ports:
+          - 5432:5432
+        # Asegura que el servicio esté saludable antes de continuar
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18' # O la versión especificada en tu proyecto
+
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: Generate Prisma client
+        working-directory: ./backend
+        run: npx prisma generate
+
+      - name: Run Prisma migrations
+        working-directory: ./backend
+        env:
+          DATABASE_URL: "postgresql://postgres:password@localhost:5432/mydatabase?schema=public" # 'localhost' porque se mapea al host del runner
+        run: npx prisma migrate deploy # 'deploy' es para entornos no-dev como CI
+
+      - name: Run backend tests
+        working-directory: ./backend
+        env:
+          DATABASE_URL: "postgresql://postgres:password@localhost:5432/mydatabase?schema=public"
+          # Añade otros ENVs necesarios para las pruebas si los hay (ej. JWT_SECRET_TEST)
+        run: npm test
+
+  backend-build-and-push-docker:
+    name: Build and Push Backend Docker Image
+    runs-on: ubuntu-latest
+    needs: backend-tests # Solo corre si las pruebas pasan
+    permissions:
+      id-token: write # Necesario para OIDC con AWS
+      contents: read  # Necesario para actions/checkout
+    outputs:
+      image_uri: ${{ steps.build-image.outputs.image_uri }}
+      image_tag: ${{ steps.build-image.outputs.image_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_FOR_ECR }} # ARN del rol IAM para ECR
+          aws-region: ${{ secrets.AWS_REGION }} # Ej: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_BACKEND || 'ai4devs-backend' }} # Nombre de tu repo ECR
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG ./backend
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image_uri=$ECR_REGISTRY/$ECR_REPOSITORY" >> $GITHUB_OUTPUT
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          
+      # --- Sección Alternativa para Docker Hub (Comentada) ---
+      # - name: Login to Docker Hub
+      #   if: false # Habilita esto y comenta la sección ECR si prefieres Docker Hub
+      #   uses: docker/login-action@v3
+      #   with:
+      #     username: ${{ secrets.DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
+      #
+      # - name: Build, tag, and push image to Docker Hub
+      #   if: false # Habilita esto y comenta la sección ECR si prefieres Docker Hub
+      #   id: build-image-dockerhub
+      #   env:
+      #     DOCKERHUB_REPOSITORY: ${{ secrets.DOCKERHUB_REPOSITORY_BACKEND || 'tu-usuario/ai4devs-backend' }}
+      #     IMAGE_TAG: ${{ github.sha }}
+      #   run: |
+      #     docker build -t $DOCKERHUB_REPOSITORY:$IMAGE_TAG ./backend
+      #     docker push $DOCKERHUB_REPOSITORY:$IMAGE_TAG
+      #     echo "::set-output name=image_uri::$DOCKERHUB_REPOSITORY"
+      #     echo "::set-output name=image_tag::$IMAGE_TAG"
+      # --------------------------------------------------------
+
+  deploy-backend-to-ec2:
+    name: Deploy Backend to EC2
+    runs-on: ubuntu-latest
+    needs: backend-build-and-push-docker # Solo corre si la imagen se construyó y empujó
+    # environment: staging # Opcional: usa GitHub Environments si tienes configuraciones por entorno
+    steps:
+      - name: Deploy to EC2 instance
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+          script: |
+            set -e # Salir inmediatamente si un comando falla
+
+            IMAGE_URI="${{ needs.backend-build-and-push-docker.outputs.image_uri }}"
+            IMAGE_TAG="${{ needs.backend-build-and-push-docker.outputs.image_tag }}"
+            CONTAINER_NAME="ai4devs-backend-container" # Nombre solicitado para el nuevo contenedor
+            OLD_CONTAINER_NAME="lti-backend" # Nombre del contenedor actual de backend_user_data.sh
+
+            # Loguearse a ECR (si es necesario en la instancia EC2, podría requerir configurar credenciales AWS en EC2 o un helper de credenciales Docker)
+            # Para ECR, la instancia EC2 necesita un rol IAM con permisos para ECR GetAuthorizationToken y ecr:BatchGetImage, ecr:GetDownloadUrlForLayer
+            # Esto podría ya estar configurado si la instancia tiene un rol adecuado.
+            # Si no, puedes ejecutar:
+            # aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+            # (Esta línea anterior necesitaría aws-cli instalado en EC2 y el rol IAM correcto en la instancia)
+
+            echo "Pulling new Docker image: $IMAGE_URI:$IMAGE_TAG"
+            docker pull $IMAGE_URI:$IMAGE_TAG
+
+            echo "Stopping and removing old container: $OLD_CONTAINER_NAME (if exists)"
+            docker stop $OLD_CONTAINER_NAME || true
+            docker rm $OLD_CONTAINER_NAME || true
+            
+            echo "Stopping and removing previous version of new container: $CONTAINER_NAME (if exists)"
+            docker stop $CONTAINER_NAME || true
+            docker rm $CONTAINER_NAME || true
+
+            echo "Starting new container: $CONTAINER_NAME"
+            docker run -d --name $CONTAINER_NAME \
+              -p 3001:3001 \
+              -e DATABASE_URL='${{ secrets.EC2_DATABASE_URL }}' \
+              -e JWT_SECRET='${{ secrets.EC2_JWT_SECRET }}' \
+              -e PORT='3001' \
+              --restart always \
+              $IMAGE_URI:$IMAGE_TAG
+            
+            echo "Deployment successful!"
+            
+            # Opcional: Limpiar imágenes antiguas de Docker para ahorrar espacio
+            docker image prune -af || true
+```
+
+### Explicación Detallada del Workflow
+
+#### 1.  Nombre del Workflow (`name`)
+Define el nombre que aparecerá en la interfaz de GitHub Actions.
+`name: Backend CI/CD Pipeline (Terraform Project)`
+
+#### 2.  Disparador (`on`)
+Este workflow se activa en eventos de `pull_request` que apuntan a las ramas `main` o `develop`.
+```yaml
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    types: # Eventos específicos del pull request
+      - opened      # Cuando se abre un PR
+      - synchronize # Cuando se empujan nuevos commits al PR
+      - reopened    # Cuando se reabre un PR
+```
+
+#### 3.  Jobs
+El workflow se compone de tres jobs secuenciales:
+
+##### Job 1: `backend-tests`
+*   **`name: Backend Tests`**: Nombre descriptivo del job.
+*   **`runs-on: ubuntu-latest`**: Especifica que el job se ejecutará en un runner de GitHub alojado con la última versión de Ubuntu.
+*   **`services`**:
+    *   Define un servicio `postgres` usando la imagen `postgres:13`.
+    *   `env`: Configura las variables de entorno para el usuario, contraseña y nombre de la base de datos, coincidiendo con tu `docker-compose.yml`.
+    *   `ports`: Mapea el puerto `5432` del contenedor PostgreSQL al `5432` del host del runner, permitiendo la conexión usando `localhost`.
+    *   `options`: Incluye una verificación de salud (`health-cmd pg_isready`) para asegurar que la base de datos esté lista antes de que los pasos del job comiencen.
+*   **`steps`**:
+    1.  **`actions/checkout@v4`**: Descarga el código de tu repositorio al runner.
+    2.  **`actions/setup-node@v4`**: Configura el entorno de Node.js. `node-version: '18'` usa la versión 18 de Node.js.
+    3.  **`Install backend dependencies`**:
+        *   `working-directory: ./backend`: Ejecuta el comando en el subdirectorio `backend`.
+        *   `run: npm ci`: Instala las dependencias de forma limpia a partir de `package-lock.json`. Es más rápido y fiable para CI que `npm install`.
+    4.  **`Generate Prisma client`**:
+        *   Ejecuta `npx prisma generate` para asegurar que el cliente Prisma esté actualizado según tu esquema.
+    5.  **`Run Prisma migrations`**:
+        *   `env: DATABASE_URL: "..."`: Configura la URL de la base de datos para conectar al servicio PostgreSQL que se ejecuta en el runner (`localhost` es correcto aquí debido al mapeo de puertos del servicio).
+        *   `run: npx prisma migrate deploy`: Aplica las migraciones pendientes. `deploy` es el comando recomendado para entornos de CI/CD, ya que no intenta crear la base de datos ni generar nuevas migraciones.
+    6.  **`Run backend tests`**:
+        *   `env: DATABASE_URL: "..."`: Proporciona la URL de la base de datos para las pruebas.
+        *   `run: npm test`: Ejecuta el script de prueba definido en tu `backend/package.json` (que es `jest`).
+
+##### Job 2: `backend-build-and-push-docker`
+*   **`name: Build and Push Backend Docker Image`**: Nombre descriptivo.
+*   **`runs-on: ubuntu-latest`**: Usa un runner Ubuntu.
+*   **`needs: backend-tests`**: Este job solo se ejecutará si el job `backend-tests` se completa con éxito.
+*   **`permissions`**:
+    *   `id-token: write`: Necesario para que la acción `aws-actions/configure-aws-credentials` pueda solicitar un token OIDC a GitHub, que luego se intercambia por credenciales temporales de AWS.
+    *   `contents: read`: Necesario para que `actions/checkout` pueda leer el repositorio.
+*   **`outputs`**:
+    *   `image_uri: ${{ steps.build-image.outputs.image_uri }}`
+    *   `image_tag: ${{ steps.build-image.outputs.image_tag }}`
+    *   Estos `outputs` permiten pasar el URI completo de la imagen y el tag al siguiente job (`deploy-backend-to-ec2`).
+*   **`steps`**:
+    1.  **`actions/checkout@v4`**: Descarga el código.
+    2.  **`aws-actions/configure-aws-credentials@v4`**: Configura las credenciales de AWS usando OpenID Connect (OIDC). Es el método recomendado y más seguro, ya que no necesitas almacenar secretos de AWS de larga duración en GitHub.
+        *   `role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_FOR_ECR }}`: El ARN del rol IAM en tu cuenta de AWS que GitHub Actions asumirá. Este rol debe tener una política de confianza configurada para el proveedor OIDC de GitHub y permisos para interactuar con ECR (ej., `AmazonEC2ContainerRegistryFullAccess` o permisos más granulares).
+        *   `aws-region: ${{ secrets.AWS_REGION }}`: Tu región de AWS.
+    3.  **`aws-actions/amazon-ecr-login@v2`**: Inicia sesión en Amazon ECR. El ID del paso es `login-ecr` para poder referenciar su output (el registry URI).
+    4.  **`Build, tag, and push image to Amazon ECR`**:
+        *   `id: build-image`: ID del paso para referenciar sus `outputs`.
+        *   `env`: Define variables de entorno para el script:
+            *   `ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}`: Obtiene dinámicamente el URI del registro ECR.
+            *   `ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY_BACKEND || 'ai4devs-backend' }}`: Nombre de tu repositorio ECR. Puedes definirlo como un secreto o usar un valor por defecto.
+            *   `IMAGE_TAG: ${{ github.sha }}`: Usa el SHA del commit como tag de la imagen, lo que asegura un tag único por cada commit.
+        *   `run`: Ejecuta los comandos Docker para construir la imagen (`docker build`), y empujarla (`docker push`) a ECR. El Dockerfile se espera en `./backend/Dockerfile`.
+        *   `echo "image_uri=..." >> $GITHUB_OUTPUT`: Establece los `outputs` del paso, que luego se convierten en `outputs` del job.
+    5.  **Sección Alternativa para Docker Hub (Comentada)**:
+        *   Se proporciona una sección comentada (`if: false`) que muestra cómo construir y empujar la imagen a Docker Hub si lo prefieres en lugar de ECR. Necesitarías configurar los secretos `DOCKERHUB_USERNAME` y `DOCKERHUB_TOKEN`.
+
+##### Job 3: `deploy-backend-to-ec2`
+*   **`name: Deploy Backend to EC2`**: Nombre descriptivo.
+*   **`runs-on: ubuntu-latest`**: Usa un runner Ubuntu.
+*   **`needs: backend-build-and-push-docker`**: Solo se ejecuta si el job anterior tuvo éxito.
+*   **`steps`**:
+    1.  **`appleboy/ssh-action@master`**: Esta acción popular permite ejecutar comandos en un servidor remoto vía SSH.
+        *   `host: ${{ secrets.EC2_HOST }}`: La IP pública o DNS de tu instancia EC2.
+        *   `username: ${{ secrets.EC2_USERNAME }}`: El usuario para la conexión SSH (ej. `ec2-user`, `ubuntu`).
+        *   `key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}`: La clave SSH privada para autenticarse en la instancia EC2.
+        *   `script`: Contiene los comandos que se ejecutarán en la instancia EC2:
+            *   `set -e`: Asegura que el script falle si cualquier comando falla.
+            *   Se obtienen `IMAGE_URI` e `IMAGE_TAG` de los `outputs` del job anterior.
+            *   Se definen `CONTAINER_NAME` para el nuevo contenedor y `OLD_CONTAINER_NAME` para el contenedor que podría estar ejecutándose desde `backend_user_data.sh`.
+            *   **Login a ECR en EC2 (Comentado):** Si la instancia EC2 no tiene un rol IAM con permisos para ECR, o un helper de credenciales Docker configurado, necesitarías iniciar sesión en ECR explícitamente antes de hacer `docker pull`. La instancia EC2 debe tener `aws-cli` instalado para esto. Idealmente, la instancia EC2 tiene un rol IAM asignado con los permisos necesarios para ECR (como `AmazonEC2ContainerRegistryReadOnly`).
+            *   `docker pull`: Descarga la nueva imagen Docker desde ECR.
+            *   `docker stop ... || true` y `docker rm ... || true`: Detiene y elimina los contenedores antiguos (`lti-backend` de tu script `user_data` y cualquier versión previa de `ai4devs-backend-container`). El `|| true` evita que el script falle si el contenedor no existe.
+            *   `docker run`: Inicia un nuevo contenedor con la imagen descargada:
+                *   `-d`: Modo detached (segundo plano).
+                *   `--name $CONTAINER_NAME`: Asigna el nombre `ai4devs-backend-container`.
+                *   `-p 3001:3001`: Mapea el puerto 3001 del host al 3001 del contenedor (asumiendo que tu aplicación en el backend escucha en el puerto 3001, como se configura en `docker-compose.yml`).
+                *   `-e DATABASE_URL='${{ secrets.EC2_DATABASE_URL }}'`: Pasa la URL de la base de datos a la aplicación.
+                *   `-e JWT_SECRET='${{ secrets.EC2_JWT_SECRET }}'`: Pasa el secreto JWT.
+                *   `-e PORT='3001'`: Pasa el puerto en el que debe escuchar la aplicación dentro del contenedor.
+                *   `--restart always`: Asegura que el contenedor se reinicie automáticamente si se detiene o si el servidor se reinicia.
+            *   `docker image prune -af || true`: (Opcional) Limpia imágenes Docker no utilizadas para ahorrar espacio en disco en la instancia EC2.
+
+### Secretos de GitHub Requeridos
+
+Para que este pipeline funcione, necesitas configurar los siguientes secretos en tu repositorio de GitHub (en `Settings` > `Secrets and variables` > `Actions`):
+
+*   **`AWS_ROLE_TO_ASSUME_FOR_ECR`**: El ARN del rol IAM que GitHub Actions asumirá para autenticarse con AWS y poder empujar imágenes a ECR. Ejemplo: `arn:aws:iam::123456789012:role/GitHubActionsECRAccessRole`.
+*   **`AWS_REGION`**: La región de AWS donde se encuentra tu ECR y posiblemente tu EC2. Ejemplo: `us-east-1`.
+*   **`ECR_REPOSITORY_BACKEND`**: (Opcional) El nombre de tu repositorio ECR para el backend si no quieres usar el valor por defecto `ai4devs-backend`. Ejemplo: `my-company/ai4devs-backend-service`.
+*   **`EC2_HOST`**: La dirección IP pública o el nombre DNS de tu instancia EC2 de destino.
+*   **`EC2_USERNAME`**: El nombre de usuario para conectarse a tu instancia EC2 vía SSH (ej. `ec2-user` para Amazon Linux, `ubuntu` para instancias Ubuntu).
+*   **`EC2_SSH_PRIVATE_KEY`**: La clave SSH privada (completa, incluyendo `-----BEGIN ... KEY-----` y `-----END ... KEY-----`) que permite el acceso a tu instancia EC2.
+*   **`EC2_DATABASE_URL`**: La URL de conexión a la base de datos que tu aplicación backend usará cuando se ejecute en la instancia EC2. Ejemplo: `postgresql://user:password@db_host:5432/mydatabase?schema=public`.
+*   **`EC2_JWT_SECRET`**: Un secreto que tu aplicación backend usa para firmar y verificar tokens JWT.
+
+*(Si eliges usar Docker Hub en lugar de ECR):*
+*   **`DOCKERHUB_USERNAME`**: Tu nombre de usuario de Docker Hub.
+*   **`DOCKERHUB_TOKEN`**: Un token de acceso personal de Docker Hub con permisos para leer y escribir imágenes.
+*   **`DOCKERHUB_REPOSITORY_BACKEND`**: (Opcional) El nombre de tu repositorio en Docker Hub. Ejemplo: `tu_usuario/ai4devs-backend`.
+
+### Dockerfile para el Backend (`backend/Dockerfile`)
+
+Si no tienes un `backend/Dockerfile`, aquí tienes una plantilla básica recomendada para una aplicación Node.js/TypeScript con Prisma. Esta utiliza una compilación multi-etapa para mantener la imagen final pequeña y segura:
+
+```dockerfile
+# ---- Etapa de Builder ----
+FROM node:18-slim AS builder
+
+WORKDIR /app
+
+# Copia package.json y package-lock.json (o yarn.lock)
+COPY backend/package*.json ./
+
+# Instala dependencias de producción y desarrollo (para compilar TypeScript y Prisma)
+RUN npm ci
+
+# Copia el esquema de Prisma
+COPY backend/prisma ./prisma/
+
+# Genera el cliente Prisma (necesario para el build de TypeScript si importas tipos de Prisma)
+RUN npx prisma generate
+
+# Copia el resto del código fuente del backend
+COPY backend/ ./
+
+# Compila TypeScript
+RUN npm run build # Asume que tienes un script "build": "npx tsc" o similar en package.json
+
+# Elimina dependencias de desarrollo e instala solo las de producción
+# Esto es opcional si tu build no produce un output que dependa de node_modules
+# y si copias solo el 'dist' y el package.json a la etapa final.
+# O, si prefieres, puedes copiar todo node_modules y luego hacer prune en la etapa final.
+# RUN npm prune --production 
+
+# ---- Etapa Final ----
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Establece el entorno a producción
+ENV NODE_ENV=production
+
+# Copia package.json y package-lock.json (solo para instalar dependencias de producción)
+COPY backend/package*.json ./
+RUN npm ci --only=production # Instala solo dependencias de producción
+
+# Copia los artefactos de build de la etapa 'builder'
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/prisma ./prisma # Copia el schema de Prisma para las migraciones en runtime si es necesario, o para el cliente
+
+# (Opcional) Si Prisma Client se genera fuera de node_modules, cópialo también
+# COPY --from=builder /app/generated/prisma ./generated/prisma 
+
+# (Opcional pero recomendado) Genera el cliente Prisma aquí si no se copió de la etapa builder
+# Esto requiere que `prisma` esté en las dependencias de producción o que se instale temporalmente.
+# RUN npx prisma generate
+
+EXPOSE 3001 # El puerto en el que tu aplicación escucha (ajusta según sea necesario)
+
+# El comando para iniciar tu aplicación
+# Asume que tu script "start" en package.json es "node dist/index.js"
+# o puedes especificarlo directamente.
+CMD ["npm", "start"]
+# O directamente: CMD ["node", "dist/index.js"]
+
+```
+**Nota sobre `backend/Dockerfile`:**
+*   Asegúrate de que las rutas de copia (`COPY backend/...`) sean correctas si tu `Dockerfile` está en la raíz del proyecto en lugar de dentro del directorio `backend/`. Si el `Dockerfile` está en `backend/`, entonces las rutas serían `COPY package*.json ./`, `COPY prisma ./prisma/`, etc. He asumido que el contexto de build es la raíz del proyecto (`docker build ... ./backend`). Si el contexto de build es `./backend` (`docker build ... -f ./backend/Dockerfile ./backend`), entonces las rutas en el Dockerfile serían relativas a `./backend`. La configuración del workflow (`docker build ... ./backend`) implica que el Dockerfile está en `./backend/Dockerfile` y el contexto es la raíz. Para simplificar, he escrito el Dockerfile como si estuviera en `backend/Dockerfile` y el contexto de build fuera `backend/`. Ajusta las rutas `COPY` si tu estructura es diferente.
+*   El comando `npm run build` debe compilar tu TypeScript a JavaScript (generalmente en un directorio `dist`).
+*   El `CMD` debe iniciar tu aplicación compilada.
+*   Asegúrate de que el puerto `EXPOSE` coincida con el puerto en el que tu aplicación escucha y el que mapeas en el comando `docker run`.
+
+### Suposiciones Realizadas
+
+*   Tu instancia EC2 de destino ya tiene Docker y AWS CLI (opcional, para login ECR) instalados y configurados.
+*   Los grupos de seguridad de tu instancia EC2 permiten tráfico entrante en el puerto SSH (normalmente 22) desde las IPs de los runners de GitHub Actions (o desde `0.0.0.0/0` si es para pruebas, **no recomendado para producción**) y en el puerto de la aplicación (3001).
+*   Has configurado un rol IAM en AWS para la autenticación OIDC desde GitHub Actions con los permisos necesarios para ECR.
+*   El `backend/package.json` tiene los scripts `test`, `build` (para compilar TypeScript) y `start` (para ejecutar la aplicación compilada).
+*   Existe un archivo `backend/Dockerfile` o crearás uno basado en la plantilla.
+
+Este pipeline te proporcionará una base sólida para la integración y el despliegue continuos de tu aplicación backend. Recuerda probarlo en un entorno de no producción primero.
+
